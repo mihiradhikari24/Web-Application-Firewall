@@ -1,0 +1,25 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+
+# Virtual env
+venv/
+.env/
+
+# Logs (IMPORTANT for your project)
+logs/
+*.jsonl
+
+# Database
+*.db
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Node (for frontend later)
+node_modules/
+build/
+dist/
