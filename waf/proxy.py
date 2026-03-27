@@ -146,6 +146,11 @@ class WAFHandler(BaseHTTPRequestHandler):
         self.send_response(403)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(body)))
+
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+
         self.end_headers()
         self.wfile.write(body)
 
@@ -181,6 +186,11 @@ class WAFHandler(BaseHTTPRequestHandler):
             for key, value in response.getheaders():
                 if key.lower() not in HOP_BY_HOP:
                     self.send_header(key, value)
+
+            self.send_header("Access-Control-Allow-Origin", "*")
+            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+            self.send_header("Access-Control-Allow-Headers", "Content-Type")
+
             self.end_headers()
 
             # Stream the response body
@@ -196,6 +206,13 @@ class WAFHandler(BaseHTTPRequestHandler):
             self.send_header("Content-Length", str(len(error_body)))
             self.end_headers()
             self.wfile.write(error_body)
+
+    def do_OPTIONS(self):
+        self.send_response(200)
+        self.send_header("Access-Control-Allow-Origin", "*")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        self.end_headers()
 
     def _handle_request(self, method, body=""):
         """Shared logic for all HTTP methods."""

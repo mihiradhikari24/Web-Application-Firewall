@@ -190,7 +190,7 @@ def test_legitimate_requests():
 
     send_post("Normal comment",
               "/comment",
-              {"author": "Carol", "body": "Great post!"})
+              {"author": "Carol", "body": "omg i made a post!"})
 
 
 # ─────────────────────────────────────────────────────────────────────────────

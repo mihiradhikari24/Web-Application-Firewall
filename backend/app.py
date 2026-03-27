@@ -74,6 +74,10 @@ class BackendHandler(BaseHTTPRequestHandler):
         elif path == "/file":
             filename = params.get("name", [""])[0]
             self._handle_file(filename)
+        elif path == "/logs":
+            self._handle_logs()
+        elif path == "/stats":
+            self._handle_stats()
         else:
             send_html(self, 404, html_page("404", "<h2>404 Not Found</h2>"))
 
@@ -180,6 +184,66 @@ class BackendHandler(BaseHTTPRequestHandler):
         DB.commit()
         body = '<div class="result"><h2>Comment added!</h2></div><a href="/comments">View</a>'
         send_html(self, 200, html_page("Comment", body))
+
+    def _handle_logs(self):
+        log_file = os.path.join(os.path.dirname(BASE_DIR), "logs", "attacks.jsonl")
+
+        logs = []
+        try:
+            with open(log_file, "r") as f:
+                for line in f:
+                    try:
+                        logs.append(json.loads(line))
+                    except:
+                        continue
+        except:
+            logs = []
+
+        # # return last 100
+        # logs = logs[-100:]
+
+        data = json.dumps(logs).encode()
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    def _handle_stats(self):
+        PROJECT_ROOT = os.path.dirname(BASE_DIR)
+        LOG_FILE = os.path.join(PROJECT_ROOT, "logs", "attacks.jsonl")
+
+        total = 0
+        types = {}
+
+        try:
+            with open(log_file, "r") as f:
+                for line in f:
+                    try:
+                        log = json.loads(line)
+                        total += 1
+                        attack = log.get("attack_type", "unknown")
+                        types[attack] = types.get(attack, 0) + 1
+                    except:
+                        continue
+        except:
+            pass
+
+        result = {
+            "total_attacks": total,
+            "by_type": types
+        }
+
+        data = json.dumps(result).encode()
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(data)))
+        self.end_headers()
+        self.wfile.write(data)
+
+    
 
 
 BACKEND_HOST = "127.0.0.1"

@@ -11,7 +11,7 @@ DB_PATH = os.path.join(BASE_DIR, "app.db")
 def init_db():
     """Recreate database from scratch every time"""
 
-    # 🔥 DELETE OLD DB FILE (correct path)
+    # DELETE OLD DB FILE (correct path)
     if os.path.exists(DB_PATH):
         os.remove(DB_PATH)
 
@@ -50,4 +50,4 @@ def init_db():
 
 if __name__ == "__main__":
     init_db()
-    print(f"✅ Database created at: {DB_PATH}")
+    print(f" Database created at: {DB_PATH}")
