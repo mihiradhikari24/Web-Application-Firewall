@@ -19,6 +19,8 @@ logs/
 .DS_Store
 Thumbs.db
 
+config/ip_lists.json
+
 # Node (for frontend later)
 node_modules/
 build/

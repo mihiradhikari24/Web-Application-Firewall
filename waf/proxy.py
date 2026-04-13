@@ -8,8 +8,10 @@ from collections import defaultdict, deque
 import time
 import os
 from datetime import datetime, timezone
+from ip_manager import IPManager
 
 REQUESTS = defaultdict(deque)
+ip_manager = IPManager()
 
 LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs")
 LOG_FILE = os.path.join(LOG_DIR, "attacks.jsonl")
@@ -40,7 +42,7 @@ def log_attack(client_ip, method, path, findings, raw_payload):
             "client_ip": client_ip,
             "method": method,
             "path": path,
-            "attack_type": finding["type"],
+            "attack_type": finding["attack_type"],
             "rule_id": finding["rule_id"],
             "field": finding["field"],
             "raw_payload": raw_payload
@@ -177,6 +179,18 @@ class WAFHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         client_ip = self.get_client_ip()
 
+        ip_manager.maybe_reload()
+        ip_manager.cleanup()
+
+        #Blacklist check
+        if ip_manager.is_blacklisted(client_ip):
+            self.send_response(403)
+            self.end_headers()
+            self.wfile.write(b"Blocked: blacklisted IP")
+            return
+
+        is_whitelisted = ip_manager.is_whitelisted(client_ip)
+
         if self.is_rate_limited(client_ip):
             self.send_response(429)
             self.end_headers()
@@ -189,11 +203,15 @@ class WAFHandler(BaseHTTPRequestHandler):
         combined = self.build_combined_payload(normalized)
         normalized_combined = normalize(combined)
 
-        findings = self.inspect(normalized, normalized_combined)
-
-        score = self.compute_score(findings)
+        if not is_whitelisted:
+            findings = self.inspect(normalized, normalized_combined)
+            score = self.compute_score(findings)
+        else:
+            findings = []
+            score = 0
 
         if score > 0:
+            ip_manager.record_attack(client_ip)
             self.block(client_ip, method, self.path, findings, combined)
         else:
             self.forward(method, self.path, body, client_ip)
