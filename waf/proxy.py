@@ -9,9 +9,10 @@ import time
 import os
 from datetime import datetime, timezone
 from ip_manager import IPManager
+from rate_limiter import RateLimiter
 
 REQUESTS = defaultdict(deque)
-ip_manager = IPManager()
+
 
 LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs")
 LOG_FILE = os.path.join(LOG_DIR, "attacks.jsonl")
@@ -31,7 +32,7 @@ def load_rules():
         with open("../rules/rules.json") as f:
             return json.load(f)["rules"]
 
-
+CONFIG = load_config()
 
 def log_attack(client_ip, method, path, findings, raw_payload):
     ensure_log_dir()
@@ -51,6 +52,10 @@ def log_attack(client_ip, method, path, findings, raw_payload):
             f.write(json.dumps(entry) + "\n")
 
 class WAFHandler(BaseHTTPRequestHandler):
+    def __init__(self, request, client_address, server):
+        super().__init__(request, client_address, server)
+        self.ip_manager = IPManager()
+        self.rate_limiter = RateLimiter(CONFIG)
     
     def log_message(self, format, *args):
         # return super().log_message(format, *args)
@@ -129,26 +134,8 @@ class WAFHandler(BaseHTTPRequestHandler):
 
         return findings
     
-    def is_rate_limited(self, ip):
-        now = time.time()
-
-        WINDOW = 10
-        LIMIT = 20
-
-        q = REQUESTS[ip]
-
-        while q and now - q[0] > WINDOW:
-            q.popleft()
-
-        if len(q) >= LIMIT:
-            return True
-
-        q.append(now)
-        return False
-    
     def forward(self, method, path, body, client_ip):
-        config = load_config()
-        host, port = parse_backend_url(config["backend"])
+        host, port = parse_backend_url(CONFIG["backend"])
 
         conn = http.client.HTTPConnection(host, port)
 
@@ -172,26 +159,26 @@ class WAFHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "text/plain")
         self.end_headers()
 
-        msg = f"Blocked by WAF: {findings[0]['type']}"
+        msg = f"Blocked by WAF: {findings[0]['attack_type']}"
         self.wfile.write(msg.encode())
 
     def handle_request(self, method, body=""):
         parsed = urlparse(self.path)
         client_ip = self.get_client_ip()
 
-        ip_manager.maybe_reload()
-        ip_manager.cleanup()
+        self.ip_manager.maybe_reload()
+        self.ip_manager.cleanup()
 
         #Blacklist check
-        if ip_manager.is_blacklisted(client_ip):
+        if self.ip_manager.is_blacklisted(client_ip):
             self.send_response(403)
             self.end_headers()
             self.wfile.write(b"Blocked: blacklisted IP")
             return
 
-        is_whitelisted = ip_manager.is_whitelisted(client_ip)
+        is_whitelisted = self.ip_manager.is_whitelisted(client_ip)
 
-        if self.is_rate_limited(client_ip):
+        if self.rate_limiter.is_rate_limited(client_ip, parsed.path):
             self.send_response(429)
             self.end_headers()
             self.wfile.write(b"Too many requests")
@@ -211,7 +198,7 @@ class WAFHandler(BaseHTTPRequestHandler):
             score = 0
 
         if score > 0:
-            ip_manager.record_attack(client_ip)
+            self.ip_manager.record_attack(client_ip)
             self.block(client_ip, method, self.path, findings, combined)
         else:
             self.forward(method, self.path, body, client_ip)
@@ -248,8 +235,8 @@ class WAFHandler(BaseHTTPRequestHandler):
 
 
 if __name__ == "__main__":
-    config = load_config()
-    port = config["waf_port"]
+    CONFIG = load_config()
+    port = CONFIG["waf_port"]
 
     server = HTTPServer(("0.0.0.0", port), WAFHandler)
     print(f"WAF running on port {port}")

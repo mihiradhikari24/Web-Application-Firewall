@@ -51,15 +51,16 @@ class IPManager:
             }, f, indent=2)
         
     def maybe_reload(self):
-        now = time.time()
+        with self.lock:    
+            now = time.time()
 
-        if now - self.last_load > self.reload_interval:
-            prev_snapshot = set(self.blacklist.keys())
-            self.load()
-            if set(self.blacklist.keys()) != prev_snapshot:
-                self.reload_interval = max(self.min_interval, self.reload_interval - 600)
-            else:
-                self.reload_interval = min(self.max_interval, self.reload_interval + 300)
+            if now - self.last_load > self.reload_interval:
+                prev_snapshot = set(self.blacklist.keys())
+                self.load()
+                if set(self.blacklist.keys()) != prev_snapshot:
+                    self.reload_interval = max(self.min_interval, self.reload_interval - 600)
+                else:
+                    self.reload_interval = min(self.max_interval, self.reload_interval + 300)
 
     def maybe_save(self):
         now = time.time()

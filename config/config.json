@@ -2,5 +2,9 @@
   "backend": "http://localhost:8081",
   "waf_port": 8080,
   "ip_reload_interval": 300,
-  "blacklist_threshold": 5
+  "blacklist_threshold": 5,
+  "rate_limits": {
+    "default": { "limit": 100, "window": 60 },
+    "/login": { "limit": 5, "window": 60 }
+  }
 }
