@@ -45,9 +45,9 @@ possible implementation: ~400 lines of well-commented Python.
    - URL-decode (two passes to catch double-encoding)
    - HTML entity decode
    - Lowercase (for case-insensitive matching)
-4. `rules.inspect_inputs()` checks each normalized value against all rule patterns
-5. If any finding: `_block()` sends HTTP 403 and writes to `logs/attacks.jsonl`
-6. If no findings: `_forward()` opens a connection to the backend and pipes the
+4. `inspect()` checks each normalized value and combined payload against all rule patterns from `rules.json`
+5. If score > 0: `block()` sends HTTP 403 and logs the attack to `logs/attacks.jsonl`
+6. If score == 0: `forward()` opens a connection to the backend and pipes the
    full response back to the client
 
 ---
@@ -57,22 +57,29 @@ possible implementation: ~400 lines of well-commented Python.
 ```
 waf_demo/
 │
-├── backend/
-│   └── app.py              Intentionally vulnerable demo web app (port 8081)
+├── backend.py              Simple backend server (port 8081)
 │
 ├── waf/
 │   ├── proxy.py            Main WAF reverse proxy (port 8080)
 │   ├── normalizer.py       Input normalization (decode, lowercase)
-│   └── rules.py            Attack detection patterns
+│   ├── rules.json          Attack detection patterns
+│   └── rules_enforcer.py   Old rules system (deprecated)
 │
 ├── scripts/
 │   ├── simulate_attacks.py Sends attack and legitimate requests to the WAF
 │   └── view_logs.py        Parse and display the attack log
 │
+├── static/                 Web interface static files
+│   ├── index.html
+│   ├── style.css
+│   └── app.js
+│
 ├── logs/
 │   └── attacks.jsonl       Attack log (JSON-lines format, created at runtime)
 │
-├── run_all.py              Starts both backend and WAF in one command
+├── cli.py                  Command-line interface for rule management
+├── web_interface.py        Web server for management interface (port 8000)
+├── run_all.py              Starts backend, WAF, and web interface
 └── README.md               This file
 ```
 
@@ -80,13 +87,17 @@ waf_demo/
 
 | Module | Purpose |
 |---|---|
-| `backend/app.py` | Vulnerable web app with SQLi, XSS, path traversal endpoints |
+| `backend.py` | Simple backend server for testing |
 | `waf/proxy.py` | Core reverse proxy: receive → inspect → block or forward |
 | `waf/normalizer.py` | Decodes encoded payloads (URL encoding, HTML entities) |
-| `waf/rules.py` | Pattern-matching rules for SQLi, XSS, traversal, command injection |
-| `waf/logger.py` | Writes blocked requests to `logs/attacks.jsonl` |
+| `waf/rules.json` | Pattern-matching rules for SQLi, XSS, traversal, command injection |
+| `waf/rules_enforcer.py` | Old rules system (deprecated) |
 | `scripts/simulate_attacks.py` | Automated attack simulation script |
 | `scripts/view_logs.py` | Log file viewer and summary tool |
+| `cli.py` | Command-line interface for managing rules |
+| `web_interface.py` | Web server for local management interface |
+| `static/` | HTML/CSS/JS files for the web interface |
+| `run_all.py` | Starts backend, WAF proxy, and web interface |
 
 ---
 
@@ -106,24 +117,55 @@ python run_all.py
 This starts:
 - Backend on http://127.0.0.1:8081
 - WAF on http://127.0.0.1:8080
+- Web interface on http://127.0.0.1:8000
 
-### Option B — Run separately (two terminals)
+### Option B — Run separately
 
 Terminal 1 — Start the backend:
 ```bash
-cd waf_demo/backend
-python app.py
+python backend.py
 ```
 
 Terminal 2 — Start the WAF:
 ```bash
-cd waf_demo/waf
-python proxy.py
+python waf/proxy.py
+```
+
+Terminal 3 — Start the web interface:
+```bash
+python web_interface.py
 ```
 
 ---
 
-## How to Simulate Attacks
+## CLI for Rules
+
+Manage WAF rules via command line:
+
+```bash
+# List all rules
+python cli.py list
+
+# Add a new rule
+python cli.py add --type "XSS" --pattern "<script>" --score 10
+
+# Update an existing rule
+python cli.py update --id "XSS-001" --pattern "<iframe>"
+
+# Delete a rule
+python cli.py delete --id "XSS-001"
+```
+
+---
+
+## Web Interface
+
+Access the local web management interface at http://localhost:8000
+
+Features:
+- **Logs & Analytics**: View blocked requests with timestamps, attack types, and basic analytics
+- **Attack Testing**: Run automated attack simulations and view results
+- **Rule CRUD**: Create, read, update, and delete WAF rules through a web form
 
 With both services running, open a third terminal:
 

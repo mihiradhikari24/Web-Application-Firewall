@@ -1,268 +1,238 @@
-"""
-waf/proxy.py
-------------
-The core WAF reverse proxy.
-
-Flow for every incoming request:
-  1. Receive request from client
-  2. Extract all user-controlled inputs (URL params, body, path)
-  3. Normalize each input (URL-decode, entity-decode, lowercase)
-  4. Check normalized inputs against attack rules
-  5a. If threat detected → return 403 Forbidden + log the attack
-  5b. If safe → forward request to backend, return response to client
-
-Uses only Python's built-in http.server and urllib — no extra dependencies.
-"""
-
-import http.client
+import json
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse, parse_qs
-
+import http.client
 from normalizer import normalize
-from rules import inspect_inputs
-from logger import log_attack, log_pass
+import re
+from collections import defaultdict, deque
+import time
+import os
+from datetime import datetime, timezone
+
+REQUESTS = defaultdict(deque)
+
+LOG_DIR = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "logs")
+LOG_FILE = os.path.join(LOG_DIR, "attacks.jsonl")
+
+def ensure_log_dir():
+    os.makedirs(LOG_DIR, exist_ok=True)
+
+def load_config():
+    with open("../config/config.json", "r") as f:
+        return json.load(f)
+    
+def parse_backend_url(url):
+    parsed = urlparse(url)
+    return parsed.hostname, parsed.port or 80
+
+def load_rules():
+        with open("../rules/rules.json") as f:
+            return json.load(f)["rules"]
 
 
-# ─────────────────────────────────────────────
-# Configuration
-# ─────────────────────────────────────────────
-WAF_HOST = "0.0.0.0"   # Listen on all interfaces
-WAF_PORT = 8080
 
-BACKEND_HOST = "127.0.0.1"
-BACKEND_PORT = 8081
+def log_attack(client_ip, method, path, findings, raw_payload):
+    ensure_log_dir()
+    timestamp = datetime.now(timezone.utc).isoformat()
+    for finding in findings:
+        entry = {
+            "timestamp": timestamp,
+            "client_ip": client_ip,
+            "method": method,
+            "path": path,
+            "attack_type": finding["type"],
+            "rule_id": finding["rule_id"],
+            "field": finding["field"],
+            "raw_payload": raw_payload
+        }
+        with open(LOG_FILE, "a") as f:
+            f.write(json.dumps(entry) + "\n")
 
-# Headers we strip before forwarding (hop-by-hop headers)
-HOP_BY_HOP = {
-    "connection", "keep-alive", "proxy-authenticate",
-    "proxy-authorization", "te", "trailers",
-    "transfer-encoding", "upgrade",
-}
-
-# HTML shown when a request is blocked
-BLOCKED_HTML = """<!DOCTYPE html>
-<html>
-<head><meta charset="utf-8"><title>403 Blocked by WAF</title>
-<style>
-  body {{ font-family: monospace; max-width: 600px; margin: 80px auto; text-align: center; }}
-  .box {{ background: #ffebee; border: 2px solid #f44336; border-radius: 8px; padding: 30px; }}
-  h1 {{ color: #c62828; }}
-  code {{ background: #f5f5f5; padding: 2px 6px; border-radius: 3px; }}
-</style>
-</head>
-<body>
-<div class="box">
-  <h1>🛡️ 403 — Request Blocked</h1>
-  <p>The Web Application Firewall has detected a potential attack in your request.</p>
-  <p>Attack type: <code>{attack_type}</code></p>
-  <p>Matched pattern: <code>{pattern}</code></p>
-  <hr>
-  <small>WAF Demo System</small>
-</div>
-</body>
-</html>"""
-
-
-# ─────────────────────────────────────────────
-# Request handler
-# ─────────────────────────────────────────────
 class WAFHandler(BaseHTTPRequestHandler):
-    """
-    Handles every HTTP request that arrives at the WAF port.
-    Decides: block or forward.
-    """
-
+    
     def log_message(self, format, *args):
-        # Suppress default access log — we have our own logging
-        pass
+        # return super().log_message(format, *args)
+        pass  # Suppress default logging to stderr
 
-    def _get_client_ip(self):
-        """Get the client's real IP (respect X-Forwarded-For if present)."""
+    def get_client_ip(self):
         xff = self.headers.get("X-Forwarded-For")
         if xff:
             return xff.split(",")[0].strip()
         return self.client_address[0]
-
-    def _read_body(self):
-        """Read the request body if Content-Length is set."""
+    
+    def read_body(self):
         length = int(self.headers.get("Content-Length", 0))
         if length:
             return self.rfile.read(length).decode(errors="replace")
         return ""
-
-    def _extract_inputs(self, parsed_url, body):
-        """
-        Collect all user-controlled input fields into a flat dict.
-
-        Returns:
-            {
-                "path": "/search",
-                "query:q": "alice",
-                "body:username": "admin",
-                ...
-            }
-
-        Each key is prefixed with its source (path/query/body)
-        so logs clearly show where the attack came from.
-        """
+    
+    def extract_inputs(self, parsed_url, body):
         inputs = {}
 
-        # The URL path itself can carry traversal payloads
         inputs["path"] = parsed_url.path
 
-        # Query string parameters (?key=value&...)
-        query_params = parse_qs(parsed_url.query)
-        for key, values in query_params.items():
-            for i, val in enumerate(values):
-                inputs[f"query:{key}"] = val
+        query = parse_qs(parsed_url.query)
+        for k, values in query.items():
+            for v in values:
+                inputs[f"query:{k}"] = v
 
-        # POST body parameters (application/x-www-form-urlencoded)
+        # body params
         if body:
             body_params = parse_qs(body)
-            for key, values in body_params.items():
-                for val in values:
-                    inputs[f"body:{key}"] = val
-            # Also inspect the raw body in case it's JSON or something else
+            for k, values in body_params.items():
+                for v in values:
+                    inputs[f"body:{k}"] = v
+
             inputs["body:raw"] = body
 
         return inputs
+    
+    def normalize_inputs(self, inputs):
+        return {k: normalize(v) for k, v in inputs.items()}
+    
+    def build_combined_payload(self, inputs):
+        return " ".join(str(v) for v in inputs.values())
+    
+    def compute_score(self, findings):
+        return sum(f["score"] for f in findings)
 
-    def _normalize_inputs(self, inputs):
-        """
-        Return a new dict with every value normalized for inspection.
-        The original inputs dict is kept intact for logging raw payloads.
-        """
-        return {field: normalize(value) for field, value in inputs.items()}
+    def inspect(self, normalized, combined):
+        findings = []
+        rules = load_rules()  # dynamic loading (important)
 
-    def _block(self, client_ip, method, path, findings, raw_payload):
-        """Send a 403 response and log the attack."""
-        # Use the first finding for the block page details
-        first = findings[0]
-        body = BLOCKED_HTML.format(
-            attack_type=first["attack_type"],
-            pattern=first["pattern"],
-        ).encode()
+        # field-wise check
+        for field, value in normalized.items():
+            for rule in rules:
+                for pattern in rule["patterns"]:   # ✅ FIX
+                    if pattern in value:           # keep simple for now
+                        findings.append({
+                            "rule_id": rule["id"],
+                            "attack_type": rule["type"],
+                            "score": rule["score"],
+                            "pattern": pattern,
+                            "field": field
+                        })
 
-        self.send_response(403)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
-        self.send_header("Content-Length", str(len(body)))
+        # combined check
+        for rule in rules:
+            for pattern in rule["patterns"]:       # ✅ FIX
+                if pattern in combined:
+                    findings.append({
+                        "rule_id": rule["id"],
+                        "attack_type": rule["type"],
+                        "score": rule["score"],
+                        "pattern": pattern,
+                        "field": "combined"
+                    })
 
-        self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-        self.send_header("Access-Control-Allow-Headers", "Content-Type")
+        return findings
+    
+    def is_rate_limited(self, ip):
+        now = time.time()
+
+        WINDOW = 10
+        LIMIT = 20
+
+        q = REQUESTS[ip]
+
+        while q and now - q[0] > WINDOW:
+            q.popleft()
+
+        if len(q) >= LIMIT:
+            return True
+
+        q.append(now)
+        return False
+    
+    def forward(self, method, path, body, client_ip):
+        config = load_config()
+        host, port = parse_backend_url(config["backend"])
+
+        conn = http.client.HTTPConnection(host, port)
+
+        headers = dict(self.headers)
+        headers["X-Forwarded-For"] = client_ip
+
+        conn.request(method, path, body=body.encode() if body else None, headers=headers)
+        response = conn.getresponse()
+
+        self.send_response(response.status)
+
+        for k, v in response.getheaders():
+            self.send_header(k, v)
 
         self.end_headers()
-        self.wfile.write(body)
+        self.wfile.write(response.read())
 
-        # Write to log file
+    def block(self, client_ip, method, path, findings, raw_payload):
         log_attack(client_ip, method, path, findings, raw_payload)
+        self.send_response(403)
+        self.send_header("Content-Type", "text/plain")
+        self.end_headers()
 
-    def _forward(self, method, path, body, client_ip):
-        """
-        Forward the request to the backend and pipe the response back.
+        msg = f"Blocked by WAF: {findings[0]['type']}"
+        self.wfile.write(msg.encode())
 
-        We open a fresh HTTP connection for each request — fine for a demo,
-        connection pooling would be needed for production.
-        """
-        try:
-            conn = http.client.HTTPConnection(BACKEND_HOST, BACKEND_PORT, timeout=10)
+    def handle_request(self, method, body=""):
+        parsed = urlparse(self.path)
+        client_ip = self.get_client_ip()
 
-            # Build clean headers to forward (remove hop-by-hop headers)
-            forward_headers = {}
-            for key, value in self.headers.items():
-                if key.lower() not in HOP_BY_HOP:
-                    forward_headers[key] = value
-
-            # Add X-Forwarded-For so the backend knows the real client IP
-            forward_headers["X-Forwarded-For"] = client_ip
-            forward_headers["X-Forwarded-By"] = "WAF-Demo"
-
-            # Make the request to the backend
-            conn.request(method, path, body=body.encode() if body else None, headers=forward_headers)
-            response = conn.getresponse()
-
-            # Forward the backend's response back to the client
-            self.send_response(response.status)
-            for key, value in response.getheaders():
-                if key.lower() not in HOP_BY_HOP:
-                    self.send_header(key, value)
-
-            self.send_header("Access-Control-Allow-Origin", "*")
-            self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
-            self.send_header("Access-Control-Allow-Headers", "Content-Type")
-
+        if self.is_rate_limited(client_ip):
+            self.send_response(429)
             self.end_headers()
+            self.wfile.write(b"Too many requests")
+            return
 
-            # Stream the response body
-            self.wfile.write(response.read())
+        inputs = self.extract_inputs(parsed, body)
+        normalized = self.normalize_inputs(inputs)
 
-            log_pass(client_ip, method, self.path)
+        combined = self.build_combined_payload(normalized)
+        normalized_combined = normalize(combined)
 
-        except Exception as e:
-            # Backend unreachable — tell the client
-            error_body = f"<h1>502 Bad Gateway</h1><p>Backend error: {e}</p>".encode()
-            self.send_response(502)
-            self.send_header("Content-Type", "text/html")
-            self.send_header("Content-Length", str(len(error_body)))
-            self.end_headers()
-            self.wfile.write(error_body)
+        findings = self.inspect(normalized, normalized_combined)
+
+        score = self.compute_score(findings)
+
+        if score > 0:
+            self.block(client_ip, method, self.path, findings, combined)
+        else:
+            self.forward(method, self.path, body, client_ip)
+
+    
+    def do_GET(self):
+        self.handle_request("GET")
+
+    def do_POST(self):
+        body = self.read_body()
+        self.handle_request("POST", body)
+
+    def do_PUT(self):
+        body = self.read_body()
+        self.handle_request("PUT", body)
+
+    def do_DELETE(self):
+        body = self.read_body()
+        self.handle_request("DELETE", body)
+
+    def do_PATCH(self):
+        body = self.read_body()
+        self.handle_request("PATCH", body)
+
+    def do_HEAD(self):
+        self.handle_request("HEAD")
 
     def do_OPTIONS(self):
         self.send_response(200)
         self.send_header("Access-Control-Allow-Origin", "*")
-        self.send_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.send_header("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, PATCH, OPTIONS")
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.end_headers()
 
-    def _handle_request(self, method, body=""):
-        """Shared logic for all HTTP methods."""
-        parsed = urlparse(self.path)
-        client_ip = self._get_client_ip()
 
-        # Step 1: Collect all inputs
-        inputs = self._extract_inputs(parsed, body)
-
-        # Step 2: Normalize inputs (decode, lowercase)
-        normalized = self._normalize_inputs(inputs)
-
-        # Step 3: Inspect normalized inputs against rules
-        findings = inspect_inputs(normalized)
-
-        # Step 4: Block or forward
-        if findings:
-            # Build a representative raw payload string for logging
-            raw_payload = " | ".join(f"{k}={v}" for k, v in inputs.items())
-            self._block(client_ip, method, parsed.path, findings, raw_payload)
-        else:
-            self._forward(method, self.path, body, client_ip)
-
-    # HTTP method handlers — all delegate to _handle_request
-    def do_GET(self):
-        self._handle_request("GET")
-
-    def do_POST(self):
-        body = self._read_body()
-        self._handle_request("POST", body)
-
-    def do_PUT(self):
-        body = self._read_body()
-        self._handle_request("PUT", body)
-
-    def do_DELETE(self):
-        self._handle_request("DELETE")
-
-    def do_HEAD(self):
-        self._handle_request("HEAD")
-
-
-# ─────────────────────────────────────────────
-# Entry point
-# ─────────────────────────────────────────────
 if __name__ == "__main__":
-    print(f"[WAF] Starting on http://{WAF_HOST}:{WAF_PORT}")
-    print(f"[WAF] Forwarding safe requests to http://{BACKEND_HOST}:{BACKEND_PORT}")
-    print(f"[WAF] Attack logs → logs/attacks.jsonl")
-    print("[WAF] Press Ctrl+C to stop\n")
+    config = load_config()
+    port = config["waf_port"]
 
-    server = HTTPServer((WAF_HOST, WAF_PORT), WAFHandler)
+    server = HTTPServer(("0.0.0.0", port), WAFHandler)
+    print(f"WAF running on port {port}")
     server.serve_forever()

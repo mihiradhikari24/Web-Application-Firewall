@@ -1,0 +1,95 @@
+{
+  "rules": [
+    {
+      "id": "SQLI-001",
+      "type": "SQL Injection",
+      "score": 10,
+      "patterns": [
+        "' or ",
+        "' or '",
+        "or 1=1",
+        "or 1 = 1",
+        "'--",
+        "--",
+        "#",
+        "union select",
+        "union all select",
+        "drop table",
+        "drop database",
+        "delete from",
+        "truncate table",
+        "; insert",
+        "; update",
+        "; delete",
+        "; drop",
+        "information_schema",
+        "sleep(",
+        "benchmark(",
+        "waitfor delay"
+      ]
+    },
+    {
+      "id": "XSS-001",
+      "type": "XSS",
+      "score": 10,
+      "patterns": [
+        "<script",
+        "</script>",
+        "onerror=",
+        "onload=",
+        "onclick=",
+        "onmouseover=",
+        "onfocus=",
+        "onblur=",
+        "javascript:",
+        "vbscript:",
+        "<iframe",
+        "<object",
+        "<embed",
+        "<svg",
+        "<img",
+        "expression(",
+        "data:text/html"
+      ]
+    },
+    {
+      "id": "PATH-001",
+      "type": "Path Traversal",
+      "score": 10,
+      "patterns": [
+        "../",
+        "..\\",
+        "%2e%2e%2f",
+        "%2e%2e/",
+        "/etc/passwd",
+        "/etc/shadow",
+        "/proc/self",
+        "c:\\windows",
+        "c:/windows",
+        "%00",
+        "\\x00"
+      ]
+    },
+    {
+      "id": "CMD-001",
+      "type": "Command Injection",
+      "score": 10,
+      "patterns": [
+        ";",
+        "|",
+        "&&",
+        "||",
+        "$(",
+        "`",
+        "whoami",
+        "id",
+        "ls ",
+        "cat ",
+        "pwd",
+        "/bin/sh",
+        "/bin/bash",
+        "cmd.exe"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,4 @@
+{
+  "backend": "http://localhost:8081",
+  "waf_port": 8080
+}
