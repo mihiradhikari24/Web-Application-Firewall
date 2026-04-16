@@ -10,7 +10,8 @@ Normalizing first gives us a cleaner string to inspect.
 
 import html
 from urllib.parse import unquote_plus
-
+import base64
+import unicodedata
 
 def normalize(value: str) -> str:
     """
@@ -26,18 +27,29 @@ def normalize(value: str) -> str:
 
     result = value
 
-    # Pass 1: URL decode (handles %3C, +, etc.)
-    result = unquote_plus(result)
+    #Multiple URL decode passes (handles deep encoding)
+    for _ in range(3):
+        decoded = unquote_plus(result)
+        if decoded == result:
+            break
+        result = decoded
 
-    # Pass 2: URL decode again (catches double-encoded payloads)
-    result = unquote_plus(result)
-
-    # Pass 3: HTML entity decode (&lt; → <, &#60; → <, etc.)
+    #HTML decode
     result = html.unescape(result)
 
-    # Pass 4: Lower-case for case-insensitive matching
-    # We return the lowercase version for pattern matching only.
-    # The original value is preserved separately for logging.
+    #Unicode normalization (important for obfuscation)
+    result = unicodedata.normalize("NFKC", result)
+
+    #Attempt base64 decode (safe attempt)
+    try:
+        #Basic heuristic: base64 strings are longer & no spaces
+        if len(result) > 8 and " " not in result:
+            decoded = base64.b64decode(result).decode(errors="ignore")
+            if decoded:
+                result += " " + decoded  
+    except:
+        pass
+
     result = result.lower()
 
     return result

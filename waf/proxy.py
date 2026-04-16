@@ -10,6 +10,7 @@ import os
 from datetime import datetime, timezone
 from ip_manager import IPManager
 from rate_limiter import RateLimiter
+from logger import log_event
 
 REQUESTS = defaultdict(deque)
 
@@ -33,6 +34,9 @@ def load_rules():
             return json.load(f)["rules"]
 
 CONFIG = load_config()
+ip_manager = IPManager()
+rate_limiter = RateLimiter(CONFIG, ip_manager)
+rules = load_rules()
 
 def log_attack(client_ip, method, path, findings, raw_payload):
     ensure_log_dir()
@@ -54,8 +58,7 @@ def log_attack(client_ip, method, path, findings, raw_payload):
 class WAFHandler(BaseHTTPRequestHandler):
     def __init__(self, request, client_address, server):
         super().__init__(request, client_address, server)
-        self.ip_manager = IPManager()
-        self.rate_limiter = RateLimiter(CONFIG)
+        
     
     def log_message(self, format, *args):
         # return super().log_message(format, *args)
@@ -100,12 +103,19 @@ class WAFHandler(BaseHTTPRequestHandler):
     def build_combined_payload(self, inputs):
         return " ".join(str(v) for v in inputs.values())
     
-    def compute_score(self, findings):
-        return sum(f["score"] for f in findings)
+    def compute_score(self, findings, ip):
+        score = 0
+
+        for f in findings:
+            score += f["score"]
+
+        prev_attacks = ip_manager.suspicious.get(ip, {}).get("attacks", 0)
+        score += min(prev_attacks * 2, 20)
+
+        return score
 
     def inspect(self, normalized, combined):
         findings = []
-        rules = load_rules()  # dynamic loading (important)
 
         # field-wise check
         for field, value in normalized.items():
@@ -151,10 +161,15 @@ class WAFHandler(BaseHTTPRequestHandler):
             self.send_header(k, v)
 
         self.end_headers()
-        self.wfile.write(response.read())
+        try:
+            self.wfile.write(response.read())
+        except BrokenPipeError:
+            pass
+        except ConnectionAbortedError:
+            pass
+
 
     def block(self, client_ip, method, path, findings, raw_payload):
-        log_attack(client_ip, method, path, findings, raw_payload)
         self.send_response(403)
         self.send_header("Content-Type", "text/plain")
         self.end_headers()
@@ -166,19 +181,46 @@ class WAFHandler(BaseHTTPRequestHandler):
         parsed = urlparse(self.path)
         client_ip = self.get_client_ip()
 
-        self.ip_manager.maybe_reload()
-        self.ip_manager.cleanup()
+        ip_manager.load()
+        ip_manager.cleanup()
 
         #Blacklist check
-        if self.ip_manager.is_blacklisted(client_ip):
+        if ip_manager.is_blacklisted(client_ip):
+            # Continue counting attacks for already-blacklisted IPs
+            ip_manager.record_attack(client_ip)
+            log_event(
+                client_ip=client_ip,
+                method=method,
+                path=self.path,
+                attack_type="Blacklisted IP",
+                rule_id="IP-001",
+                field="ip",
+                pattern="blacklist",
+                raw_payload="",
+                status="BLACKLISTED"
+            )
             self.send_response(403)
             self.end_headers()
             self.wfile.write(b"Blocked: blacklisted IP")
             return
 
-        is_whitelisted = self.ip_manager.is_whitelisted(client_ip)
+        is_whitelisted = ip_manager.is_whitelisted(client_ip)
 
-        if self.rate_limiter.is_rate_limited(client_ip, parsed.path):
+        if rate_limiter.is_rate_limited(client_ip, parsed.path):
+            ip_manager.record_attack(client_ip)
+
+            log_event(
+                client_ip=client_ip,
+                method=method,
+                path=self.path,
+                attack_type="Rate Limit",
+                rule_id="RATE-001",
+                field="rate_limiter",
+                pattern="token_bucket_exceeded",
+                raw_payload="",
+                status="RATE_LIMITED"
+            )
+
             self.send_response(429)
             self.end_headers()
             self.wfile.write(b"Too many requests")
@@ -192,13 +234,26 @@ class WAFHandler(BaseHTTPRequestHandler):
 
         if not is_whitelisted:
             findings = self.inspect(normalized, normalized_combined)
-            score = self.compute_score(findings)
+            score = self.compute_score(findings, client_ip)
         else:
             findings = []
             score = 0
 
-        if score > 0:
-            self.ip_manager.record_attack(client_ip)
+        if findings and score >= 10:
+            ip_manager.record_attack(client_ip)
+            for finding in findings:
+                log_event(
+                    client_ip=client_ip,
+                    method=method,
+                    path=self.path,
+                    attack_type=finding["attack_type"],
+                    rule_id=finding["rule_id"],
+                    field=finding["field"],
+                    pattern=finding["pattern"],
+                    raw_payload=combined,
+                    status="BLOCKED"
+                )
+
             self.block(client_ip, method, self.path, findings, combined)
         else:
             self.forward(method, self.path, body, client_ip)

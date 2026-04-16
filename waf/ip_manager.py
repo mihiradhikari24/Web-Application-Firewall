@@ -30,12 +30,14 @@ class IPManager:
         try:
             with open(IP_FILE) as f:
                 data = json.load(f)
-            
+
+            # 🔥 FULL overwrite (NOT merge)
             self.whitelist = set(data.get("whitelist", []))
             self.blacklist = data.get("blacklist", {})
             self.suspicious = data.get("suspicious", {})
 
             self.last_load = time.time()
+
         except Exception as e:
             print("IPManager load error:", e)
             self.whitelist = set()
@@ -63,10 +65,10 @@ class IPManager:
                     self.reload_interval = min(self.max_interval, self.reload_interval + 300)
 
     def maybe_save(self):
-        now = time.time()
-        if now - self.last_save > 5:
-            self.save()
-            self.last_save = now
+        # now = time.time()
+        # if now - self.last_save >= 0:
+        self.save()
+            # self.last_save = now
 
     def is_whitelisted(self, ip):
         return ip in self.whitelist
